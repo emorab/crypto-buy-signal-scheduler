@@ -1,0 +1,45 @@
+name: Crypto Buy Signal monitor
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: crypto-buy-signal-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Run deterministic market monitor
+        env:
+          MONITOR_ENDPOINT: https://btc-buy-signal-45k.emora-agile.chatgpt.site/api/monitor/run
+          SITES_BYPASS_TOKEN: ${{ secrets.SITES_BYPASS_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+
+          http_status="$(curl --silent --show-error \
+            --output "$response_file" \
+            --write-out "%{http_code}" \
+            --request POST \
+            --header "Accept: application/json" \
+            --header "OAI-Sites-Authorization: Bearer ${SITES_BYPASS_TOKEN}" \
+            --header "X-Monitor-Trigger: scheduler" \
+            "${MONITOR_ENDPOINT}")"
+
+          if [[ "$http_status" -lt 200 || "$http_status" -ge 300 ]]; then
+            echo "::error::Monitor returned HTTP ${http_status}"
+            jq -r '.error // .message // "Unknown monitor error"' "$response_file"
+            exit 1
+          fi
+
+          jq '{ok, run_id, gate_open, blockers, checked_count, actionable_count, sent_count, message}' "$response_file"
