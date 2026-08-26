@@ -27,19 +27,40 @@ jobs:
           response_file="$(mktemp)"
           trap 'rm -f "$response_file"' EXIT
 
-          http_status="$(curl --silent --show-error \
-            --output "$response_file" \
-            --write-out "%{http_code}" \
-            --request POST \
-            --header "Accept: application/json" \
-            --header "OAI-Sites-Authorization: Bearer ${SITES_BYPASS_TOKEN}" \
-            --header "X-Monitor-Trigger: scheduler" \
-            "${MONITOR_ENDPOINT}")"
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            if http_status="$(curl --silent --show-error \
+              --max-time 90 \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --request POST \
+              --header "Accept: application/json" \
+              --header "OAI-Sites-Authorization: Bearer ${SITES_BYPASS_TOKEN}" \
+              --header "X-Monitor-Trigger: scheduler" \
+              "${MONITOR_ENDPOINT}")"; then
+              :
+            else
+              http_status="000"
+            fi
 
-          if [[ "$http_status" -lt 200 || "$http_status" -ge 300 ]]; then
-            echo "::error::Monitor returned HTTP ${http_status}"
-            jq -r '.error // .message // "Unknown monitor error"' "$response_file"
-            exit 1
-          fi
+            if [[ "$http_status" -ge 200 && "$http_status" -lt 300 ]]; then
+              break
+            fi
+
+            error_detail="$(jq -r '.error // .message // "Unknown monitor error"' "$response_file" 2>/dev/null || head -c 500 "$response_file")"
+            transient=false
+            if [[ "$http_status" == "000" || "$http_status" == "408" || "$http_status" == "425" || "$http_status" == "429" || "$http_status" -ge 500 ]]; then
+              transient=true
+            fi
+
+            if [[ "$transient" == "false" || "$attempt" -eq "$max_attempts" ]]; then
+              echo "::error::Monitor returned HTTP ${http_status} after ${attempt} attempt(s): ${error_detail}"
+              exit 1
+            fi
+
+            delay_seconds=$((attempt * 15))
+            echo "::warning::Transient monitor error HTTP ${http_status} on attempt ${attempt}/${max_attempts}: ${error_detail}. Retrying in ${delay_seconds}s."
+            sleep "$delay_seconds"
+          done
 
           jq '{ok, run_id, gate_open, blockers, checked_count, actionable_count, sent_count, message}' "$response_file"
